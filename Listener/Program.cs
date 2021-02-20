@@ -30,9 +30,14 @@ namespace Listener
             {
                 _allDone.Reset();
 
-                _socket.BeginAccept(
-                    new AsyncCallback(AcceptCallback),
-                    _socket);
+                try
+                {
+                    _socket.BeginAccept(new AsyncCallback(AcceptCallback), _socket);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(ex.ToString());
+                }
 
                 _allDone.WaitOne();
             }
@@ -47,37 +52,58 @@ namespace Listener
             var handler = listener?.EndAccept(ar);
 
             var state = new StateObject(handler);
-            handler?.BeginReceive(state.Buffer, 0, state.BufferSize, 0,
-                new AsyncCallback(ReceiveCallback), state);
+            handler?.BeginReceive(state.Buffer, 0, state.BufferSize, 0, new AsyncCallback(ReceiveCallback), state);
         }
 
         private static void ReceiveCallback(IAsyncResult ar)
         {
-            var state = (StateObject)ar.AsyncState;
-            var handler = state?.Socket;
+            EndPoint endPoint = default(EndPoint);
 
-            if (handler == null)
-                return;
-
-            int bytesRead = handler.EndReceive(ar);
-
-            if (bytesRead <= 0)
-                return;
-
-            state.TotalReceivedBytes += bytesRead;
-            state.Cache.AddRange(state.Buffer);
-            state.SendData.AddRange(state.Buffer);
-
-            if (state.Cache.Skip(state.TotalReceivedBytes - 2).Take(2).SequenceEqual(new byte[] { 0x0D, 0x0A }))
+            try
             {
-                Console.WriteLine("Received {0} bytes from {1}:\r\n{2}\r\n", bytesRead, handler.RemoteEndPoint, string.Join(" ", BitConverter.ToString(state.Cache.Take(bytesRead).ToArray()).Split("-").Select(x => "0x" + x)));
+                var state = (StateObject)ar.AsyncState;
+                var handler = state?.Socket;
+                endPoint = handler.RemoteEndPoint;
 
-                Send(state);
+                if (handler == null)
+                    return;
+
+                int bytesRead = handler.EndReceive(ar);
+
+                if (bytesRead <= 0)
+                    return;
+
+                state.TotalReceivedBytes += bytesRead;
+                state.Cache.AddRange(state.Buffer);
+                state.SendData.AddRange(state.Buffer);
+
+                if (state.Cache.Skip(state.TotalReceivedBytes - 2).Take(2).SequenceEqual(new byte[]
+                {
+                    0x0D, 0x0A
+                }))
+                {
+                    Console.WriteLine("Received {0} bytes from {1}:\r\n{2}\r\n", bytesRead, handler.RemoteEndPoint, string.Join(" ", BitConverter.ToString(state.Cache.Take(bytesRead).ToArray()).Split("-").Select(x => "0x" + x)));
+
+                    var stateCopy = new StateObject(handler);
+                    state.CopyTo(stateCopy);
+                    Send(stateCopy);
+
+                    state = new StateObject(handler);
+                    handler?.BeginReceive(state.Buffer, 0, state.BufferSize, 0, new AsyncCallback(ReceiveCallback), state);
+                }
+                else
+                {
+                    handler.BeginReceive(state.Buffer, 0, state.BufferSize, 0, new AsyncCallback(ReceiveCallback), state);
+                }
             }
-            else
+            catch (Exception ex)
             {
-                handler.BeginReceive(state.Buffer, 0, state.BufferSize, 0,
-                    new AsyncCallback(ReceiveCallback), state);
+                if (ex is SocketException)
+                {
+                    Console.WriteLine("{0} - {1}", endPoint, ex.Message);
+                    Console.WriteLine(ex.ToString());
+                    Console.WriteLine("========================================================================================================================");
+                }
             }
         }
 
@@ -115,9 +141,6 @@ namespace Listener
                 {
                     Console.WriteLine("Sent {0} bytes to client:\r\n{1}", bytesSent, string.Join(" ", BitConverter.ToString(state.Cache.Take(state.TotalReceivedBytes).ToArray()).Split("-").Select(x => "0x" + x)));
                     Console.WriteLine("========================================================================================================================");
-
-                    socket.Shutdown(SocketShutdown.Both);
-                    socket.Close();
                 }
                 else
                 {
